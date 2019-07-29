@@ -1,2 +1,2 @@
 # miscellany
-various helpful scripts snippets and similar
+various helpful scripts, snippets, and similar
