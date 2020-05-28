@@ -23,8 +23,8 @@ globaldict /MyPageCount 1 put % initialize page counter
     dup % need it twice (width determination and actual show)
     stringwidth pop % get width of page counter string ...
     currentpagedevice /PageSize get 0 get % get width from PageSize on stack
-    exch sub 298 sub % pagewidth - stringwidth - some extra space
-    20 moveto % move to calculated x and y=20 (0/0 is the bottom left corner)
+    exch sub 292 sub % pagewidth - stringwidth - some extra space
+    10 moveto % move to calculated x and y=20 (0/0 is the bottom left corner)
     show % finally show the page counter
     globaldict /MyPageCount MyPageCount 1 add put % increment page counter
   } if
