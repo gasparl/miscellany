@@ -1,0 +1,8 @@
+
+
+gs \
+  -dBATCH -dNOPAUSE -dAutoRotatePages=/None \
+  -sDEVICE=pdfwrite -dPDFSETTINGS=/prepress \
+  -sOutputFile=full_merged.pdf \
+  -f pp.ps -f *.pdf
+
