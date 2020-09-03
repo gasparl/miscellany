@@ -134,6 +134,17 @@ resid(aov_BBW)
 resid(aov_BWW)
 resid(aov_BBWW)
 
+# aov vs lm
+
+lm_WW = lm(values ~ wthn_X*btwn_X + subject, data = dat_l)
+sum(lm_WW$residuals**2)
+
+aov_WW = aov(values ~ wthn_X * wthn_Y + Error(subject / (wthn_X * wthn_Y)), data = dat_l)
+sum(aov_WW$`subject:wthn_X`$residuals**2)
+sum(aov_WW$`subject:wthn_X:wthn_Y`$residuals**2)
+
+summary(aov_WW)
+
 ## aov VS ez
 
 aov_BBWWaov = aov(values ~ btwn_X * btwn_Y * wthn_X * wthn_Y +
