@@ -4,7 +4,7 @@
 ' after running, delete the macro before (or when) saving the file
 ' (note: you can easily change color, e.g. use wdColorRed for red)
 
-Sub tracked_to_red()
+Sub tracked_to_color()
     ActiveDocument.TrackRevisions = False
     For Each storyRange In ActiveDocument.StoryRanges
         For Each Change In storyRange.Revisions
