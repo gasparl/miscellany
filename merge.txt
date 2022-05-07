@@ -1,4 +1,4 @@
-
+Using "pp.ps" for adding page numbers:
 
 gs \
   -dBATCH -dNOPAUSE -dAutoRotatePages=/None \
@@ -6,3 +6,11 @@ gs \
   -sOutputFile=full_merged.pdf \
   -f pp.ps -f *.pdf
 
+
+Without page numbers and under dedicated folder:
+
+gs \
+  -dBATCH -dNOPAUSE -dAutoRotatePages=/None \
+  -sDEVICE=pdfwrite -dPDFSETTINGS=/prepress \
+  -sOutputFile=./myfolder/full_merged.pdf \
+  -f *.pdf
