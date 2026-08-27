@@ -4,33 +4,41 @@
 The Whisper model is loaded once and reused for the whole folder. Existing
 video, audio, and embedded English subtitle streams are never modified.
 
-Install:
-    python3 -m venv whisper-env
-    source whisper-env/bin/activate
-    python -m pip install faster-whisper
+System tools required by either method:
+    sudo apt install python3-venv ffmpeg mkvtoolnix mpv
 
-Examples:
-    # Current folder: create Japanese SRTs and bilingual MKVs
-    python japanese_subs.py
+Method 1 - install one reusable command (run from this file's folder):
+    mkdir -p ~/.local/share/japanese-subs
+    cp japanese_subs.py ~/.local/share/japanese-subs/
+    python3 -m venv ~/.local/share/japanese-subs/.venv
+    ~/.local/share/japanese-subs/.venv/bin/python -m pip install faster-whisper
 
-    # Another folder, including its subfolders
-    python japanese_subs.py /path/to/episodes --recursive
+Add this line to ~/.bashrc, then open a new terminal:
+    alias japanese-subs="$HOME/.local/share/japanese-subs/.venv/bin/python $HOME/.local/share/japanese-subs/japanese_subs.py"
 
-    # Maximum-accuracy model (requires substantially more memory)
-    python japanese_subs.py /path/to/episodes --model large-v3
+Run from a folder containing videos:
+    japanese-subs
 
-    # NVIDIA GPU with the default turbo model
-    python japanese_subs.py /path/to/episodes \
-        --device cuda --compute-type float16
+Or process another folder and its subfolders:
+    japanese-subs /path/to/episodes --recursive
 
-    # Create only Japanese SRT sidecars, without bilingual MKVs
-    python japanese_subs.py /path/to/episodes --no-mux
+Method 2 - local setup in the current video/script folder:
+    python3 -m venv .venv
+    ./.venv/bin/python -m pip install faster-whisper
+    ./.venv/bin/python japanese_subs.py
+
+Useful options:
+    --recursive             Include subfolders
+    --test [SECONDS]        Create a short .test.srt sample (default: 60s)
+    --mux                   Also create bilingual MKV files
+    --sync-offset SECONDS   Shift subtitles later (+) or earlier (-)
+    --model large-v3        Maximum accuracy, but requires much more memory
+    --device cuda --compute-type float16   Use a compatible NVIDIA GPU
 """
 
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import math
 import re
@@ -67,13 +75,27 @@ class AudioStream:
     language: str
     title: str
     is_default: bool
+    start_time: float
+
+
+@dataclass(frozen=True)
+class SubtitleCue:
+    start: float
+    end: float
+    text: str
 
 
 class ActivityReporter:
     """Print a periodic heartbeat for work that exposes no measurable progress."""
 
-    def __init__(self, message: str, interval: float = 20.0) -> None:
+    def __init__(
+        self,
+        message: str,
+        ongoing_message: str,
+        interval: float = 60.0,
+    ) -> None:
         self.message = message
+        self.ongoing_message = ongoing_message
         self.interval = interval
         self.started = 0.0
         self.stop_event = threading.Event()
@@ -89,7 +111,10 @@ class ActivityReporter:
     def _report(self) -> None:
         while not self.stop_event.wait(self.interval):
             elapsed = format_duration(time.monotonic() - self.started)
-            print(f"  Still working ({elapsed} elapsed)...", flush=True)
+            print(
+                f"{self.ongoing_message} | elapsed {elapsed} | ETA unavailable",
+                flush=True,
+            )
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         self.stop_event.set()
@@ -98,6 +123,8 @@ class ActivityReporter:
 
 
 def format_duration(seconds: float) -> str:
+    if 0 < seconds < 1:
+        return f"{seconds:.1f}s"
     total_seconds = max(0, round(seconds))
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
@@ -106,6 +133,75 @@ def format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {secs:02d}s"
     return f"{secs}s"
+
+
+def positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number of seconds") from error
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return seconds
+
+
+def progress_segments(
+    segments: Iterable[object], total_duration: float
+) -> Iterable[object]:
+    """Report clear, rounded transcription progress at most once per minute."""
+    total_duration = max(0.0, float(total_duration))
+    processed_seconds = 0.0
+    started = time.monotonic()
+    stop_event = threading.Event()
+    completed = False
+
+    total_label = format_duration(total_duration) if total_duration else "unknown"
+    print(
+        f"  Transcribing Japanese audio (media duration: {total_label})...",
+        flush=True,
+    )
+
+    def report() -> None:
+        while not stop_event.wait(60.0):
+            elapsed = time.monotonic() - started
+            processed = min(processed_seconds, total_duration) if total_duration else 0
+            if processed > 0 and total_duration > 0:
+                percent = min(99, round(processed * 100 / total_duration))
+                speed = processed / max(elapsed, 0.001)
+                remaining = max(0.0, total_duration - processed) / max(speed, 0.001)
+                print(
+                    f"  Progress: {percent}% | audio "
+                    f"{format_duration(processed)}/{format_duration(total_duration)} "
+                    f"| elapsed {format_duration(elapsed)} "
+                    f"| ETA {format_duration(remaining)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "  Progress: waiting for first chunk "
+                    f"| elapsed {format_duration(elapsed)} | ETA unavailable",
+                    flush=True,
+                )
+
+    thread = threading.Thread(target=report, daemon=True)
+    thread.start()
+    try:
+        for segment in segments:
+            try:
+                processed_seconds = max(processed_seconds, float(segment.end))
+            except (AttributeError, TypeError, ValueError):
+                pass
+            yield segment
+        completed = True
+    finally:
+        stop_event.set()
+        thread.join()
+        if completed:
+            elapsed = time.monotonic() - started
+            print(
+                f"  Transcription complete | elapsed {format_duration(elapsed)}",
+                flush=True,
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,7 +243,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--subs-dir",
         type=Path,
-        help="Subtitle output folder (default: INPUT/ja-subs).",
+        help=(
+            "Optional subtitle output folder. By default each SRT is written "
+            "beside its video with exactly the same basename."
+        ),
     )
     parser.add_argument(
         "--recursive",
@@ -179,12 +278,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sync-offset",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "Shift all generated subtitle times by this many seconds: positive "
+            "values display later, negative values earlier (default: 0)."
+        ),
+    )
+    parser.add_argument(
+        "--test",
+        nargs="?",
+        const=60.0,
+        type=positive_seconds,
+        metavar="SECONDS",
+        help=(
+            "Quickly transcribe only the beginning of each video and write a "
+            "separate .test.srt file (default sample: 60 seconds)."
+        ),
+    )
+    parser.add_argument(
         "--mux",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
-            "Remux each original and Japanese SRT into a new bilingual MKV "
-            "(default: enabled; use --no-mux for SRT files only)."
+            "Also remux each original and Japanese SRT into a new bilingual MKV "
+            "(default: disabled)."
         ),
     )
     parser.add_argument(
@@ -245,8 +365,9 @@ def discover_videos(
 def make_jobs(
     videos: Iterable[Path],
     input_root: Path,
-    subs_root: Path,
+    subs_root: Optional[Path],
     mux_root: Path,
+    test_mode: bool = False,
 ) -> list[Job]:
     jobs: list[Job] = []
     subtitle_sources: dict[Path, Path] = {}
@@ -261,7 +382,12 @@ def make_jobs(
                 ) from error
         else:
             relative_parent = Path()
-        subtitle = subs_root / relative_parent / f"{video.stem}.ja.srt"
+        subtitle_name = f"{video.stem}{'.test' if test_mode else ''}.srt"
+        subtitle = (
+            video.with_name(subtitle_name)
+            if subs_root is None
+            else subs_root / relative_parent / subtitle_name
+        )
         muxed = mux_root / relative_parent / f"{video.stem}.bilingual.mkv"
 
         if subtitle in subtitle_sources:
@@ -302,24 +428,154 @@ def srt_is_usable(subtitle: Path) -> bool:
     return SRT_TIMING.search(sample) is not None
 
 
-def write_srt_atomic(subtitle: Path, segments: Iterable[object]) -> int:
+def normalize_subtitle_text(text: str) -> str:
+    return " ".join(text.replace("\n", " ").split()).strip()
+
+
+def join_word_texts(parts: Iterable[str]) -> str:
+    # Faster-Whisper word strings include any required leading spaces. Joining
+    # first preserves spaces in Latin text without adding spaces to Japanese.
+    return normalize_subtitle_text("".join(parts))
+
+
+def wrap_subtitle_text(text: str, max_line_characters: int = 16) -> str:
+    """Wrap a cue onto at most two balanced lines without changing its text."""
+    text = normalize_subtitle_text(text)
+    if len(text) <= max_line_characters:
+        return text
+
+    # Cues are limited to 28 characters below, so a break in this range keeps
+    # both lines within the 16-character display target. Prefer punctuation or
+    # whitespace, but Japanese can also be safely wrapped between characters.
+    first_possible = max(1, len(text) - max_line_characters)
+    last_possible = min(max_line_characters, len(text) - 1)
+    target = len(text) / 2
+    # A fallback segment without word timings can exceed the normal 28-character
+    # cue limit. In that rare case, balance two lines instead of failing.
+    positions = (
+        range(first_possible, last_possible + 1)
+        if first_possible <= last_possible
+        else range(1, len(text))
+    )
+    natural_breaks = [
+        position
+        for position in positions
+        if text[position - 1] in "、。，．！？!?…；;：:"
+        or text[position - 1].isspace()
+        or text[position].isspace()
+    ]
+    if natural_breaks:
+        choices = natural_breaks
+    elif first_possible <= last_possible:
+        choices = list(range(first_possible, last_possible + 1))
+    else:
+        choices = list(range(1, len(text)))
+    split_at = min(choices, key=lambda position: abs(position - target))
+    left = text[:split_at].rstrip()
+    right = text[split_at:].lstrip()
+    if not left or not right:
+        return text
+    return f"{left}\n{right}"
+
+
+def subtitle_cues(
+    segments: Iterable[object], timestamp_offset: float = 0.0
+) -> Iterable[SubtitleCue]:
+    """Build short cues from word timestamps instead of coarse raw segments."""
+    max_duration = 5.0
+    max_characters = 28
+    # A short silence is a useful, non-destructive hint that a speaker turn may
+    # have occurred. It can split one speaker's speech too, but never invents a
+    # speaker label or changes the recognized words.
+    break_gap = 0.55
+    sentence_endings = ("。", "！", "？", "!", "?")
+
+    for segment in segments:
+        timed_words: list[tuple[float, float, str]] = []
+        for word in getattr(segment, "words", None) or []:
+            raw_start = getattr(word, "start", None)
+            raw_end = getattr(word, "end", None)
+            if raw_start is None or raw_end is None:
+                continue
+            try:
+                start = float(raw_start)
+                end = float(raw_end)
+            except (TypeError, ValueError):
+                continue
+            text = str(getattr(word, "word", ""))
+            if not math.isfinite(start) or not math.isfinite(end) or not text.strip():
+                continue
+            timed_words.append((start, max(end, start + 0.001), text))
+
+        if not timed_words:
+            text = normalize_subtitle_text(str(getattr(segment, "text", "")))
+            if text:
+                raw_start = float(getattr(segment, "start")) + timestamp_offset
+                start = max(0.0, raw_start)
+                end = float(getattr(segment, "end")) + timestamp_offset
+                yield SubtitleCue(
+                    start,
+                    max(end, start + 0.001),
+                    wrap_subtitle_text(text),
+                )
+            continue
+
+        group: list[tuple[float, float, str]] = []
+
+        def make_cue(words: list[tuple[float, float, str]]) -> SubtitleCue:
+            raw_start = words[0][0] + timestamp_offset
+            start = max(0.0, raw_start)
+            end = words[-1][1] + timestamp_offset
+            return SubtitleCue(
+                start=start,
+                end=max(end, start + 0.001),
+                text=wrap_subtitle_text(
+                    join_word_texts(item[2] for item in words)
+                ),
+            )
+
+        for word in timed_words:
+            if group:
+                gap = word[0] - group[-1][1]
+                candidate_text = join_word_texts(
+                    [item[2] for item in group] + [word[2]]
+                )
+                candidate_duration = word[1] - group[0][0]
+                if (
+                    gap >= break_gap
+                    or candidate_duration > max_duration
+                    or len(candidate_text) > max_characters
+                ):
+                    yield make_cue(group)
+                    group = []
+
+            group.append(word)
+            current_text = join_word_texts(item[2] for item in group)
+            current_duration = group[-1][1] - group[0][0]
+            if current_text.endswith(sentence_endings) and current_duration >= 1.0:
+                yield make_cue(group)
+                group = []
+
+        if group:
+            yield make_cue(group)
+
+
+def write_srt_atomic(subtitle: Path, cues: Iterable[SubtitleCue]) -> int:
     subtitle.parent.mkdir(parents=True, exist_ok=True)
     temporary = subtitle.with_suffix(subtitle.suffix + ".tmp")
     cue_count = 0
 
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as output:
-            for segment in segments:
-                text = " ".join(segment.text.strip().splitlines()).strip()
-                if not text:
+        # The UTF-8 BOM makes encoding unambiguous to SMPlayer and older players.
+        with temporary.open("w", encoding="utf-8-sig", newline="\n") as output:
+            for cue in cues:
+                if not cue.text:
                     continue
                 cue_count += 1
-                start = float(segment.start)
-                end = max(float(segment.end), start + 0.001)
                 output.write(
                     f"{cue_count}\n"
-                    f"{srt_timestamp(start)} --> {srt_timestamp(end)}\n"
-                    f"{text}\n\n"
+                    f"{srt_timestamp(cue.start)} --> {srt_timestamp(cue.end)}\n"
+                    f"{cue.text}\n\n"
                 )
 
         if cue_count == 0:
@@ -345,7 +601,10 @@ def probe_audio_streams(video: Path) -> list[AudioStream]:
         "-select_streams",
         "a",
         "-show_entries",
-        "stream=index:stream_tags=language,title:stream_disposition=default",
+        (
+            "stream=index,start_time:stream_tags=language,title:"
+            "stream_disposition=default"
+        ),
         "-of",
         "json",
         str(video),
@@ -375,9 +634,18 @@ def probe_audio_streams(video: Path) -> list[AudioStream]:
                 language=str(tags.get("language", "und")),
                 title=str(tags.get("title", "")),
                 is_default=bool(disposition.get("default", 0)),
+                start_time=parse_optional_float(raw.get("start_time")),
             )
         )
     return streams
+
+
+def parse_optional_float(value: object) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
 
 
 def describe_audio_stream(stream: AudioStream) -> str:
@@ -386,6 +654,8 @@ def describe_audio_stream(stream: AudioStream) -> str:
         details.append(f"title={stream.title!r}")
     if stream.is_default:
         details.append("default")
+    if abs(stream.start_time) >= 0.001:
+        details.append(f"timeline start={stream.start_time:+.3f}s")
     return f"audio #{stream.audio_index} ({', '.join(details)})"
 
 
@@ -438,12 +708,12 @@ def choose_audio_stream(video: Path, requested: Optional[int]) -> AudioStream:
 
 
 def selected_audio(
-    video: Path, stream: Optional[int]
+    video: Path, stream: Optional[int], test_seconds: Optional[float] = None
 ) -> tuple[Optional[tempfile.TemporaryDirectory], AudioStream]:
-    """Return selected 16 kHz audio when it is not the first stream."""
+    """Return selected 16 kHz audio when selection or clipping requires it."""
     chosen = choose_audio_stream(video, stream)
     print(f"  Using {describe_audio_stream(chosen)}")
-    if chosen.audio_index == 0:
+    if chosen.audio_index == 0 and test_seconds is None:
         return None, chosen
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
@@ -467,9 +737,18 @@ def selected_audio(
         "1",
         "-ar",
         "16000",
-        "-y",
-        str(wav),
     ]
+    if test_seconds is not None:
+        print(
+            f"  Test mode: extracting the first {format_duration(test_seconds)}."
+        )
+        command.extend(["-t", f"{test_seconds:.3f}"])
+    command.extend(
+        [
+            "-y",
+            str(wav),
+        ]
+    )
     try:
         subprocess.run(command, check=True)
     except Exception:
@@ -479,7 +758,7 @@ def selected_audio(
 
 
 def transcribe_job(model: object, job: Job, args: argparse.Namespace) -> int:
-    audio_temp, _chosen = selected_audio(job.video, args.audio_stream)
+    audio_temp, chosen = selected_audio(job.video, args.audio_stream, args.test)
     try:
         audio_source = (
             Path(audio_temp.name) / "selected.wav" if audio_temp else job.video
@@ -491,32 +770,18 @@ def transcribe_job(model: object, job: Job, args: argparse.Namespace) -> int:
             "vad_filter": not args.no_vad,
             "condition_on_previous_text": True,
             "initial_prompt": args.initial_prompt,
+            "word_timestamps": True,
         }
-        try:
-            supports_progress = (
-                "log_progress" in inspect.signature(model.transcribe).parameters
+        segments, info = model.transcribe(str(audio_source), **transcribe_options)
+        timestamp_offset = chosen.start_time + args.sync_offset
+        if abs(timestamp_offset) >= 0.001:
+            print(
+                f"  Applying timeline offset {timestamp_offset:+.3f}s "
+                "(media timing plus --sync-offset)."
             )
-        except (TypeError, ValueError):
-            supports_progress = False
-
-        if supports_progress:
-            transcribe_options["log_progress"] = True
-            print("  Transcribing (the progress bar includes an ETA)...", flush=True)
-            segments, _info = model.transcribe(
-                str(audio_source), **transcribe_options
-            )
-            return write_srt_atomic(job.subtitle, segments)
-
-        # Older Faster-Whisper versions lack log_progress. Keep a heartbeat so
-        # they do not appear frozen, but avoid inventing an unreliable ETA.
-        print(
-            "  This Faster-Whisper version has no progress bar; consider upgrading it."
-        )
-        with ActivityReporter("  Transcribing...", interval=20.0):
-            segments, _info = model.transcribe(
-                str(audio_source), **transcribe_options
-            )
-            return write_srt_atomic(job.subtitle, segments)
+        measured_segments = progress_segments(segments, float(info.duration))
+        cues = subtitle_cues(measured_segments, timestamp_offset)
+        return write_srt_atomic(job.subtitle, cues)
     finally:
         if audio_temp is not None:
             audio_temp.cleanup()
@@ -564,9 +829,14 @@ def remux(job: Job, model_name: str, overwrite: bool) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.test is not None and args.mux:
+        print("Test mode creates a sample SRT only; --mux will be ignored.")
+        args.mux = False
     input_path = args.input.expanduser().resolve()
     input_root = input_path if input_path.is_dir() else input_path.parent
-    subs_root = (args.subs_dir or input_root / "ja-subs").expanduser().resolve()
+    subs_root = (
+        args.subs_dir.expanduser().resolve() if args.subs_dir is not None else None
+    )
     mux_root = (args.mux_dir or input_root / "bilingual").expanduser().resolve()
     compute_type = args.compute_type or default_compute_type(args.device)
 
@@ -577,10 +847,17 @@ def main() -> int:
             excluded_dirs=(
                 folder
                 for folder in (subs_root, mux_root)
+                if folder is not None
                 if folder != input_root and is_inside(folder, input_root)
             ),
         )
-        jobs = make_jobs(videos, input_root, subs_root, mux_root)
+        jobs = make_jobs(
+            videos,
+            input_root,
+            subs_root,
+            mux_root,
+            test_mode=args.test is not None,
+        )
     except (FileNotFoundError, OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
@@ -590,7 +867,10 @@ def main() -> int:
         return 1
 
     print(f"Found {len(jobs)} video(s).")
-    print(f"Japanese subtitles: {subs_root}")
+    if subs_root is None:
+        print("Japanese subtitles: beside each video, with the same basename")
+    else:
+        print(f"Japanese subtitles: {subs_root}")
     if args.mux:
         print(f"Bilingual MKVs:     {mux_root}")
 
@@ -625,9 +905,12 @@ def main() -> int:
         )
         try:
             with ActivityReporter(
-                f"Loading {args.model} once on {args.device} with compute type "
-                f"{compute_type}.{download_hint}",
-                interval=20.0,
+                f"Preparing the {args.model} model on {args.device} with compute "
+                f"type {compute_type}.{download_hint}",
+                (
+                    "  Model setup still running (download/cache/load)"
+                ),
+                interval=60.0,
             ):
                 model = WhisperModel(
                     args.model,
