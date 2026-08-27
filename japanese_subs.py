@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 """Create Japanese subtitle sidecars from Japanese audio in video files.
 
+The Whisper model is loaded once and reused for the whole folder. Existing
+video, audio, and embedded English subtitle streams are never modified.
+
 Install:
-    sudo apt install python3-venv ffmpeg mkvtoolnix mpv
-
-    # Simple local environment:
-    python3 -m venv .venv
-    ./.venv/bin/python -m pip install faster-whisper
-    ./.venv/bin/python japanese_subs.py --mux
-
-    # Alternatively, install once for use anywhere:
-    mkdir -p ~/.local/share/japanese-subs
-    cp japanese_subs.py ~/.local/share/japanese-subs/
-    python3 -m venv ~/.local/share/japanese-subs/.venv
-    ~/.local/share/japanese-subs/.venv/bin/python -m pip install faster-whisper
-
-    Add this line to ~/.bashrc:
-    alias japanese-subs="$HOME/.local/share/japanese-subs/.venv/bin/python $HOME/.local/share/japanese-subs/japanese_subs.py"
+    python3 -m venv whisper-env
+    source whisper-env/bin/activate
+    python -m pip install faster-whisper
 
 Examples:
-    # Current folder:
-    japanese-subs --mux
+    # Current folder: create Japanese SRTs and bilingual MKVs
+    python japanese_subs.py
 
-    # Another folder:
-    japanese-subs "/path/to/episodes" --mux
+    # Another folder, including its subfolders
+    python japanese_subs.py /path/to/episodes --recursive
 
-    # Include subfolders:
-    japanese-subs "/path/to/episodes" --recursive --mux
+    # Maximum-accuracy model (requires substantially more memory)
+    python japanese_subs.py /path/to/episodes --model large-v3
+
+    # NVIDIA GPU with the default turbo model
+    python japanese_subs.py /path/to/episodes \
+        --device cuda --compute-type float16
+
+    # Create only Japanese SRT sidecars, without bilingual MKVs
+    python japanese_subs.py /path/to/episodes --no-mux
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import math
 import re
@@ -39,6 +38,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -68,6 +69,45 @@ class AudioStream:
     is_default: bool
 
 
+class ActivityReporter:
+    """Print a periodic heartbeat for work that exposes no measurable progress."""
+
+    def __init__(self, message: str, interval: float = 20.0) -> None:
+        self.message = message
+        self.interval = interval
+        self.started = 0.0
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "ActivityReporter":
+        self.started = time.monotonic()
+        print(self.message, flush=True)
+        self.thread = threading.Thread(target=self._report, daemon=True)
+        self.thread.start()
+        return self
+
+    def _report(self) -> None:
+        while not self.stop_event.wait(self.interval):
+            elapsed = format_duration(time.monotonic() - self.started)
+            print(f"  Still working ({elapsed} elapsed)...", flush=True)
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join()
+
+
+def format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -84,8 +124,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="large-v3",
-        help="Whisper model name (default: large-v3; try medium on a slow CPU).",
+        default="turbo",
+        help=(
+            "Whisper model name (default: turbo; use large-v3 only when maximum "
+            "accuracy matters and sufficient memory is available)."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -137,8 +180,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mux",
-        action="store_true",
-        help="Also remux each original and Japanese SRT into a new MKV.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Remux each original and Japanese SRT into a new bilingual MKV "
+            "(default: enabled; use --no-mux for SRT files only)."
+        ),
     )
     parser.add_argument(
         "--mux-dir",
@@ -437,16 +484,39 @@ def transcribe_job(model: object, job: Job, args: argparse.Namespace) -> int:
         audio_source = (
             Path(audio_temp.name) / "selected.wav" if audio_temp else job.video
         )
-        segments, _info = model.transcribe(
-            str(audio_source),
-            language="ja",
-            task="transcribe",
-            beam_size=5,
-            vad_filter=not args.no_vad,
-            condition_on_previous_text=True,
-            initial_prompt=args.initial_prompt,
+        transcribe_options = {
+            "language": "ja",
+            "task": "transcribe",
+            "beam_size": 5,
+            "vad_filter": not args.no_vad,
+            "condition_on_previous_text": True,
+            "initial_prompt": args.initial_prompt,
+        }
+        try:
+            supports_progress = (
+                "log_progress" in inspect.signature(model.transcribe).parameters
+            )
+        except (TypeError, ValueError):
+            supports_progress = False
+
+        if supports_progress:
+            transcribe_options["log_progress"] = True
+            print("  Transcribing (the progress bar includes an ETA)...", flush=True)
+            segments, _info = model.transcribe(
+                str(audio_source), **transcribe_options
+            )
+            return write_srt_atomic(job.subtitle, segments)
+
+        # Older Faster-Whisper versions lack log_progress. Keep a heartbeat so
+        # they do not appear frozen, but avoid inventing an unreliable ETA.
+        print(
+            "  This Faster-Whisper version has no progress bar; consider upgrading it."
         )
-        return write_srt_atomic(job.subtitle, segments)
+        with ActivityReporter("  Transcribing...", interval=20.0):
+            segments, _info = model.transcribe(
+                str(audio_source), **transcribe_options
+            )
+            return write_srt_atomic(job.subtitle, segments)
     finally:
         if audio_temp is not None:
             audio_temp.cleanup()
@@ -548,16 +618,23 @@ def main() -> int:
             )
             return 2
 
-        print(
-            f"Loading {args.model} once on {args.device} "
-            f"with compute type {compute_type}..."
+        download_hint = (
+            " First use downloads about 3.1 GB; download time has no reliable ETA."
+            if args.model == "large-v3"
+            else " First use may need to download the model."
         )
         try:
-            model = WhisperModel(
-                args.model,
-                device=args.device,
-                compute_type=compute_type,
-            )
+            with ActivityReporter(
+                f"Loading {args.model} once on {args.device} with compute type "
+                f"{compute_type}.{download_hint}",
+                interval=20.0,
+            ):
+                model = WhisperModel(
+                    args.model,
+                    device=args.device,
+                    compute_type=compute_type,
+                )
+            print("Model ready.")
         except Exception as error:
             print(f"Could not load Whisper model: {error}", file=sys.stderr)
             return 2
