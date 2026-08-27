@@ -145,63 +145,229 @@ def positive_seconds(value: str) -> float:
     return seconds
 
 
+def estimate_remaining_time(
+    total_duration: float,
+    processed: float,
+    elapsed: float,
+) -> Optional[float]:
+    """Estimate remaining time from average decoder speed for the whole run."""
+    if total_duration <= 0 or processed <= 0 or elapsed <= 0:
+        return None
+    remaining_audio = max(0.0, total_duration - processed)
+    if remaining_audio == 0:
+        return 0.0
+
+    speed = processed / elapsed
+    if not math.isfinite(speed) or speed <= 0:
+        return None
+    estimate = remaining_audio / speed
+    return estimate if math.isfinite(estimate) else None
+
+
+def transcription_progress_line(
+    processed: float,
+    total_duration: float,
+    elapsed: float,
+    remaining: Optional[float],
+    *,
+    complete: bool = False,
+    terminal_width: Optional[int] = None,
+) -> str:
+    """Build a progress line that cannot wrap in the available terminal width."""
+    processed = max(0.0, processed)
+    if total_duration > 0:
+        processed = min(processed, total_duration)
+        ratio = processed / total_duration
+        percent = 100 if complete else min(99, round(ratio * 100))
+        audio_label = (
+            f"{format_duration(total_duration if complete else processed)}/"
+            f"{format_duration(total_duration)}"
+        )
+        percent_label = f"{percent:3d}%"
+    else:
+        ratio = 0.0
+        audio_label = f"{format_duration(processed)}/unknown"
+        percent_label = " --%"
+
+    if complete:
+        eta_label = "done"
+    elif remaining is None:
+        eta_label = "calculating"
+    else:
+        eta_label = f"~{format_duration(remaining)}"
+
+    elapsed_label = format_duration(elapsed)
+    suffixes = [
+        (
+            f" {percent_label} | audio {audio_label} "
+            f"| elapsed {elapsed_label} | ETA {eta_label}"
+        ),
+        (
+            f" {percent_label} | {audio_label} "
+            f"| elapsed {elapsed_label} | ETA {eta_label}"
+        ),
+        f" {percent_label} | {audio_label} | ETA {eta_label}",
+        f" {percent_label} | ETA {eta_label}",
+        f" {percent_label}",
+    ]
+    indent = "  "
+    # Leave the terminal's last column unused: writing into it can trigger an
+    # automatic wrap before the next carriage return is processed.
+    line_limit = max(1, terminal_width - 1) if terminal_width else None
+    suffix = suffixes[0]
+    bar_width = 24
+    if line_limit is not None:
+        for candidate in suffixes:
+            available = line_limit - len(indent) - 2 - len(candidate)
+            if available >= 8:
+                suffix = candidate
+                bar_width = min(24, available)
+                break
+        else:
+            suffix = suffixes[-1]
+            bar_width = max(1, line_limit - len(indent) - 2 - len(suffix))
+
+    filled = bar_width if complete else min(
+        max(0, bar_width - 1), int(ratio * bar_width)
+    )
+    bar = "#" * filled + "-" * (bar_width - filled)
+    line = f"{indent}[{bar}]{suffix}"
+    return line if line_limit is None else line[:line_limit]
+
+
 def progress_segments(
-    segments: Iterable[object], total_duration: float
+    segments: Iterable[object],
+    work_duration: float,
+    seek_unit_seconds: float,
+    media_duration: float,
 ) -> Iterable[object]:
-    """Report clear, rounded transcription progress at most once per minute."""
-    total_duration = max(0.0, float(total_duration))
+    """Show decoder progress using Faster-Whisper's post-VAD seek position."""
+    try:
+        parsed_work_duration = float(work_duration)
+    except (TypeError, ValueError):
+        parsed_work_duration = 0.0
+    work_duration = (
+        parsed_work_duration
+        if math.isfinite(parsed_work_duration) and parsed_work_duration > 0
+        else 0.0
+    )
+    try:
+        parsed_media_duration = float(media_duration)
+    except (TypeError, ValueError):
+        parsed_media_duration = 0.0
+    media_duration = (
+        parsed_media_duration
+        if math.isfinite(parsed_media_duration) and parsed_media_duration > 0
+        else work_duration
+    )
+    if not math.isfinite(seek_unit_seconds) or seek_unit_seconds <= 0:
+        seek_unit_seconds = 0.01
+
     processed_seconds = 0.0
     started = time.monotonic()
     stop_event = threading.Event()
+    progress_lock = threading.Lock()
     completed = False
+    interactive = sys.stdout.isatty()
+    refresh_interval = 1.0 if interactive else 60.0
 
-    total_label = format_duration(total_duration) if total_duration else "unknown"
-    print(
-        f"  Transcribing Japanese audio (media duration: {total_label})...",
-        flush=True,
-    )
+    media_label = format_duration(media_duration) if media_duration else "unknown"
+    if work_duration and abs(media_duration - work_duration) >= 1.0:
+        print(
+            "  Transcribing Japanese audio "
+            f"({media_label} media; {format_duration(work_duration)} after VAD)...",
+            flush=True,
+        )
+    else:
+        print(f"  Transcribing Japanese audio ({media_label})...", flush=True)
+
+    def emit(line: str, *, newline: bool = False) -> None:
+        if interactive:
+            # CR returns to column zero and CSI 2K clears the physical line.
+            # `transcription_progress_line` guarantees that this never wraps.
+            sys.stdout.write(f"\r\033[2K{line}")
+            if newline:
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            print(line, flush=True)
+
+    def terminal_columns() -> Optional[int]:
+        if not interactive:
+            return None
+        return max(20, shutil.get_terminal_size(fallback=(80, 24)).columns)
 
     def report() -> None:
-        while not stop_event.wait(60.0):
+        while not stop_event.wait(refresh_interval):
             elapsed = time.monotonic() - started
-            processed = min(processed_seconds, total_duration) if total_duration else 0
-            if processed > 0 and total_duration > 0:
-                percent = min(99, round(processed * 100 / total_duration))
-                speed = processed / max(elapsed, 0.001)
-                remaining = max(0.0, total_duration - processed) / max(speed, 0.001)
-                print(
-                    f"  Progress: {percent}% | audio "
-                    f"{format_duration(processed)}/{format_duration(total_duration)} "
-                    f"| elapsed {format_duration(elapsed)} "
-                    f"| ETA {format_duration(remaining)}",
-                    flush=True,
+            with progress_lock:
+                processed = processed_seconds
+            if work_duration:
+                processed = min(processed, work_duration)
+            remaining = estimate_remaining_time(
+                work_duration,
+                processed,
+                elapsed,
+            )
+            emit(
+                transcription_progress_line(
+                    processed,
+                    work_duration,
+                    elapsed,
+                    remaining,
+                    terminal_width=terminal_columns(),
                 )
-            else:
-                print(
-                    "  Progress: waiting for first chunk "
-                    f"| elapsed {format_duration(elapsed)} | ETA unavailable",
-                    flush=True,
-                )
+            )
+
+    if interactive:
+        emit(
+            transcription_progress_line(
+                processed=0.0,
+                total_duration=work_duration,
+                elapsed=0.0,
+                remaining=None,
+                terminal_width=terminal_columns(),
+            )
+        )
 
     thread = threading.Thread(target=report, daemon=True)
     thread.start()
     try:
         for segment in segments:
             try:
-                processed_seconds = max(processed_seconds, float(segment.end))
+                # `end` is a subtitle timestamp mapped back onto the original
+                # media timeline. `seek` is the decoder's position in the
+                # VAD-filtered workload and is therefore the sound progress unit.
+                segment_seek = float(segment.seek) * seek_unit_seconds
             except (AttributeError, TypeError, ValueError):
-                pass
+                segment_seek = 0.0
+            if math.isfinite(segment_seek) and segment_seek > 0:
+                with progress_lock:
+                    processed_seconds = max(processed_seconds, segment_seek)
             yield segment
         completed = True
     finally:
         stop_event.set()
         thread.join()
+        elapsed = time.monotonic() - started
         if completed:
-            elapsed = time.monotonic() - started
-            print(
-                f"  Transcription complete | elapsed {format_duration(elapsed)}",
-                flush=True,
+            with progress_lock:
+                processed = processed_seconds
+            emit(
+                transcription_progress_line(
+                    processed=processed,
+                    total_duration=work_duration,
+                    elapsed=elapsed,
+                    remaining=0.0,
+                    complete=True,
+                    terminal_width=terminal_columns(),
+                ),
+                newline=interactive,
             )
+        elif interactive:
+            # Keep the following error or Ctrl-C message off the progress line.
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
 
 def parse_args() -> argparse.Namespace:
@@ -560,14 +726,20 @@ def subtitle_cues(
             yield make_cue(group)
 
 
+def partial_subtitle_path(subtitle: Path) -> Path:
+    """Return a recognizable SRT path for live, incomplete output."""
+    return subtitle.with_name(f"{subtitle.stem}.partial{subtitle.suffix}")
+
+
 def write_srt_atomic(subtitle: Path, cues: Iterable[SubtitleCue]) -> int:
+    """Write a viewable partial SRT, replacing the final SRT only on success."""
     subtitle.parent.mkdir(parents=True, exist_ok=True)
-    temporary = subtitle.with_suffix(subtitle.suffix + ".tmp")
+    partial = partial_subtitle_path(subtitle)
     cue_count = 0
 
     try:
         # The UTF-8 BOM makes encoding unambiguous to SMPlayer and older players.
-        with temporary.open("w", encoding="utf-8-sig", newline="\n") as output:
+        with partial.open("w", encoding="utf-8-sig", newline="\n") as output:
             for cue in cues:
                 if not cue.text:
                     continue
@@ -577,12 +749,22 @@ def write_srt_atomic(subtitle: Path, cues: Iterable[SubtitleCue]) -> int:
                     f"{srt_timestamp(cue.start)} --> {srt_timestamp(cue.end)}\n"
                     f"{cue.text}\n\n"
                 )
+                # Make every completed cue visible to an editor or player while
+                # transcription continues; an expensive disk fsync is unnecessary.
+                output.flush()
 
         if cue_count == 0:
             raise RuntimeError("Whisper returned no subtitle cues")
-        temporary.replace(subtitle)
-    except Exception:
-        temporary.unlink(missing_ok=True)
+        partial.replace(subtitle)
+    except BaseException:
+        if cue_count:
+            print(
+                f"  Kept {cue_count} completed cues in: {partial}",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            partial.unlink(missing_ok=True)
         raise
 
     return cue_count
@@ -751,7 +933,7 @@ def selected_audio(
     )
     try:
         subprocess.run(command, check=True)
-    except Exception:
+    except BaseException:
         temporary.cleanup()
         raise
     return temporary, chosen
@@ -779,7 +961,19 @@ def transcribe_job(model: object, job: Job, args: argparse.Namespace) -> int:
                 f"  Applying timeline offset {timestamp_offset:+.3f}s "
                 "(media timing plus --sync-offset)."
             )
-        measured_segments = progress_segments(segments, float(info.duration))
+        feature_extractor = getattr(model, "feature_extractor", None)
+        seek_unit_seconds = parse_optional_float(
+            getattr(feature_extractor, "time_per_frame", 0.01)
+        ) or 0.01
+        work_duration = parse_optional_float(
+            getattr(info, "duration_after_vad", info.duration)
+        )
+        measured_segments = progress_segments(
+            segments,
+            work_duration=work_duration,
+            seek_unit_seconds=seek_unit_seconds,
+            media_duration=parse_optional_float(info.duration),
+        )
         cues = subtitle_cues(measured_segments, timestamp_offset)
         return write_srt_atomic(job.subtitle, cues)
     finally:
@@ -952,4 +1146,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        raise SystemExit(130)
