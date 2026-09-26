@@ -1,0 +1,95 @@
+Create candidate notes for my Anki deck in a Markdown file. After I delete unwanted sections and reupload it, check the survivors and produce a text file for Anki's GUI import.
+
+DECK
+My GLmisc note type has these fields, in order:
+phrase | translation | explanation | example use | example translation
+One note makes Japanese-to-English and English-to-Japanese cards. Put the Japanese example in phrase, make translation useful as a reverse prompt, and leave the last two fields empty.
+
+INPUTS
+Grammar points (include spreadsheet level/number and intended sense if available; distinguish meanings of identical written forms):
+
+[PASTE GRAMMAR POINTS HERE]
+
+Vocabulary pool (include readings, intended meanings or usage restrictions if known):
+
+[PASTE VOCABULARY HERE]
+
+RESEARCH AND GENERATION
+1. Grammar is the required target. Research each point's formation, attachment, meaning, nuance, register and distinct uses, consulting JLPT Sensei and cross-checking subtleties. Make at least four genuinely different candidates per point, more when its constructions or senses justify them. Together, they should cover the point thoroughly, not merely paraphrase one use.
+2. Vocabulary is an optional pool. Use a supplied entry only where it fits naturally and illustrates its intended sense. Vary your choices across the pool; ideally, each used entry appears in two or three candidates.
+3. Verify vocabulary readings, parts of speech, senses, collocations and register with reliable dictionaries (e.g. JMdict/Jisho, Wiktionary or a Japanese dictionary). Check each phrase's grammar and vocabulary sense. Write original, natural, fairly short Japanese in plausible settings. Do not force pairings, present your sentence as a source's example, or copy long passages or batches of examples.
+4. Give each phrase a faithful English translation that follows the Japanese wording and order closely, even if the English sounds a little unnatural. Do not silently supply a subject, object or article absent from the Japanese: put implied English words in square brackets, such as [I], [it] or [the/a]. You can use short parentheses for a nuance, literal gloss or alternative, without letting them overwhelm the main translation. When multiple Japanese expressions could answer the English-to-Japanese card, add a compact sense cue where helpful. For example: 論[ろん]文[ぶん]を 読[よ]み 込[こ]む → "[the/a] thesis/paper to read thoroughly/deeply/repeatedly"; 空振[からぶ]りしても 続[つづ]ける → "even if you miss/fail (~end in failure) [to] continue (~keep going)". Following Anki's formatting, use half-width square-bracket furigana in phrase, for example 片[かた]付[づ]ける; in sentences, put a space before a separately annotated kanji group, for example この 本[ほん]を 読[よ]んだ.
+5. The explanation is usually multiple lines, with real newlines and useful indentation. Give each target's title and central meaning its own line. Explain grammar formation/attachment, nuance or restrictions, contrasts, and short glossed examples as justified; for complex points, include relevant forms and negatives. Keep explanations consistent across a grammar point's candidates, adding a sentence-specific note if needed. Separate the vocabulary summary from grammar with a blank line. Combine close synonyms with slashes and distinct senses with semicolons; retain verified supplied senses, marking uncommon/contextual uses. Give an attested noun's する-verb use a separate line; do not invent one.
+6. Review every candidate for naturalness, exact construction and intended sense, correct readings/furigana, English accuracy, distinctness from the other candidates, and consistency between the stated grammar/vocabulary targets and what the phrase actually teaches. Flag any specific unresolved issue outside the Anki fields.
+
+EXPLANATION STYLE EXAMPLES
+These examples from my earlier notes show the desired detail and line layout. Do not treat them as targets unless listed above.
+
+Example A: a vocabulary word together with a grammar point
+phrase:
+部屋[へや]はもう 片[かた]付[づ]けてある。
+translation:
+As for the room, [someone] has already tidied [it] up (~and left it tidy).
+explanation:
+片[かた]付[づ]ける: to tidy/clean up; to put away; to settle/resolve (a matter); to deal with/finish (a task); to marry off (less common); to eliminate/kill (someone; contextual).
+
+～てある: An intentional action was done, and its result remains (often as preparation).
+    Form: transitive verb in て-form + ある.
+    Example: ドアを開ける (to open the door) → ドアが開けてある (the door has been left open).
+    Here, 片付けてある says that someone tidied the room and it is now tidy.
+
+Example B: a grammar point with different attachments and negative forms
+phrase:
+彼[かれ]はプロだそうだ。
+translation:
+He is a professional, I hear (~reportedly).
+explanation:
+そうだ (hearsay): "I heard that..."; "it is said that..."
+    Reports information from another source, not the speaker's visual impression.
+    Form: attach そうだ to a plain-form clause. Nouns and な-adjectives retain だ.
+    Verb: 来るそうだ → "I hear (he) is coming."
+    い-adjective: 忙しいそうだ → "I hear (he) is busy."
+    な-adjective: 元気だそうだ → "I hear (he) is well."
+    Noun: 学生だそうだ → "I hear (he) is a student."
+    Negative: put the ordinary plain negative before そうだ.
+        Verb: 来ないそうだ → "I hear (he) is not coming."
+        い-adjective: 忙しくないそうだ → "I hear (he) is not busy."
+        な-adjective: 元気じゃないそうだ → "I hear (he) is not well."
+        Noun: 学生じゃないそうだ → "I hear (he) is not a student."
+
+Another vocabulary-summary pattern, when the noun and する verb both exist:
+掃除[そうじ]: cleaning; sweeping up; dusting.
+掃除[そうじ]する: to clean; to sweep up.
+
+A simpler point needs fewer lines; for distinct senses (e.g. そうだ as hearsay versus appearance), keep the attachment rules separate.
+
+REVIEW FILE
+Create one UTF-8 .md file. At the top, copy the supplied grammar and vocabulary lists, retaining levels/numbers and sense distinctions, so they remain after I delete candidates. Then add "## Candidates" and group sections by grammar point.
+
+Give each candidate a ### heading naming its grammar point (with a sense label if needed) and any vocabulary taught, e.g. "### ～てある · 片付ける". Use just the grammar when no vocabulary is taught. Under it, put exactly three labeled, fenced plain-text blocks to preserve newlines and indentation:
+
+**phrase**
+```text
+...
+```
+
+**translation**
+```text
+...
+```
+
+**explanation**
+```text
+...
+```
+
+After the blocks, add **Sources:** with direct links to the grammar lesson and dictionary entries, and **Review note:** only for a concrete concern. Headings, links, notes and input lists are not Anki fields. Use no other ### headings; each candidate runs to the next ### or the file's end so I can delete it as a unit.
+
+In chat, briefly summarize the grammar and vocabulary used and any notable gaps or concerns.
+
+CURATION AND IMPORT
+When I upload the curated .md with some candidates removed, recheck surviving notes against the input lists and sources for readings, translations and grammar coverage. Briefly summarize what remains.
+
+Produce one import-ready UTF-8 tab-separated .txt file for Anki's File > Import dialog. Each data line must contain exactly the five GLmisc fields in the deck's order: phrase, translation, explanation, empty example use, empty example translation. Use only the contents of the three fenced fields, not their Markdown labels or any research metadata. Convert explanation's real line breaks to <br> at export, preserving blank lines as two <br> tags; convert leading indentation to &nbsp; so HTML does not collapse it. HTML-escape literal <, > and & in field text before adding those HTML markers; replace accidental tab characters inside fields so they cannot split columns. Add supported file headers #separator:Tab, #html:true, #notetype:GLmisc, #columns with the five tab-separated field names, and #tags with a unique batch tag. Validate the exported file by reading it back and checking its data-row count against the surviving candidate sections, five fields per data row (including both final empty fields), no duplicate phrase values and no review metadata.
+
+I will use Anki's File > Import dialog. Remind me to make a backup, check the deck, note type, five field mappings and HTML preview, and choose Ignore duplicates with match scope Note type so matching GLmisc notes are not updated.
