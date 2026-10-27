@@ -1,4 +1,4 @@
-Create candidate notes for my Anki deck in a Markdown fil, with a brief example sentence or phrase in Japanese. After I delete unwanted sections and reupload it, check the survivors and produce a text file for Anki's GUI import.
+Create candidate notes for my Anki deck in a Markdown file, with a brief example sentence or phrase in Japanese. After I delete unwanted sections and reupload it, check the survivors and produce a text file for Anki's GUI import.
 
 DECK
 My GLmisc note type has these fields, in order:
